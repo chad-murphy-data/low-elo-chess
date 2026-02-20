@@ -32,6 +32,9 @@ python run_pipeline.py analyze
 
 # Step 4: Generate plots
 python run_pipeline.py plot
+
+# Live dashboard (run in a separate terminal alongside the pipeline)
+python run_pipeline.py dashboard
 ```
 
 ### Options
@@ -42,6 +45,8 @@ python run_pipeline.py plot
 --target-users N      Users per ELO band (default: 200)
 --target-games N      Games per user (default: 20)
 --max-iterations N    Max snowball iterations (default: 50)
+--host HOST           Dashboard host (default: 127.0.0.1)
+--port PORT           Dashboard port (default: 5050)
 ```
 
 For a quick test run:

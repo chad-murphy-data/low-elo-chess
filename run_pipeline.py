@@ -8,6 +8,7 @@ Usage:
     python run_pipeline.py features         # Step 2: Build feature dataset from PGNs
     python run_pipeline.py analyze          # Step 3: Run logistic regression + tests
     python run_pipeline.py plot             # Step 4: Generate all plots
+    python run_pipeline.py dashboard        # Launch live dashboard on localhost:5050
     python run_pipeline.py --help           # Show this help
 
 Steps can be run independently. Each step reads from / writes to the data/
@@ -83,6 +84,18 @@ def step_plot(args):
     generate_all_plots(csv_path=str(csv_path), fig_dir=str(fig_dir))
 
 
+def step_dashboard(args):
+    """Launch live dashboard on localhost."""
+    from src.dashboard import run_dashboard
+
+    run_dashboard(
+        host=args.host,
+        port=args.port,
+        data_dir=args.data_dir,
+        results_dir=args.results_dir,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Chess Blunder Hazard Model Pipeline",
@@ -91,8 +104,16 @@ def main():
     )
     parser.add_argument(
         "steps", nargs="*", default=["all"],
-        choices=["all", "collect", "features", "analyze", "plot"],
+        choices=["all", "collect", "features", "analyze", "plot", "dashboard"],
         help="Which pipeline step(s) to run (default: all)",
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="Dashboard host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port", type=int, default=5050,
+        help="Dashboard port (default: 5050)",
     )
     parser.add_argument(
         "--data-dir", default="data",
@@ -126,6 +147,7 @@ def main():
         "features": step_features,
         "analyze": step_analyze,
         "plot": step_plot,
+        "dashboard": step_dashboard,
     }
 
     for step_name in steps:
