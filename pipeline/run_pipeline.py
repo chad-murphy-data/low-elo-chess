@@ -3,7 +3,7 @@
 Chess Blunder Hazard Model — Full Pipeline
 
 Usage:
-    python run_pipeline.py                  # Run all steps
+    python run_pipeline.py                  # Run all steps (with live refresh)
     python run_pipeline.py collect          # Step 1: Collect data from Lichess
     python run_pipeline.py features         # Step 2: Build feature dataset from PGNs
     python run_pipeline.py analyze          # Step 3: Run logistic regression + tests
@@ -16,6 +16,9 @@ and results/ directories.
 
 The 'collect' step hits the Lichess API and can take a while depending on
 how many users/games you target. The other steps are fast once data exists.
+
+When running 'all' (default), features/analysis/plots refresh incrementally
+every --refresh-every new PGN downloads so the dashboard stays up-to-date.
 """
 
 import argparse
@@ -23,21 +26,48 @@ import sys
 from pathlib import Path
 
 
-def step_collect(args):
+def _make_refresh_callback(args):
+    """Create a callback that runs features → analyze → plot."""
+    def on_new_games(data_dir):
+        from src.features import build_dataset
+        from src.analysis import run_analysis
+        from src.plots import generate_all_plots
+
+        csv_path = Path(data_dir) / "moves_features.csv"
+        fig_dir = Path(args.results_dir) / "figures"
+
+        df = build_dataset(data_dir=data_dir)
+        if len(df) >= 100:
+            run_analysis(csv_path=str(csv_path), results_dir=args.results_dir)
+            generate_all_plots(csv_path=str(csv_path), fig_dir=str(fig_dir))
+        else:
+            print(f"  Only {len(df)} observations -- skipping analysis (need >=100)")
+
+    return on_new_games
+
+
+def step_collect(args, live=False):
     """Step 1: Collect games from Lichess API via snowball sampling."""
     from src.collect import collect_data
 
     print("=" * 60)
     print("STEP 1: Collecting data from Lichess API")
+    if live:
+        print(f"  (live mode: refreshing analysis every {args.refresh_every} new downloads)")
     print("=" * 60)
     print()
 
-    collect_data(
+    kwargs = dict(
         data_dir=args.data_dir,
         target_users=args.target_users,
         target_games=args.target_games,
         max_iterations=args.max_iterations,
     )
+    if live:
+        kwargs["on_new_games"] = _make_refresh_callback(args)
+        kwargs["refresh_every"] = args.refresh_every
+
+    collect_data(**kwargs)
 
 
 def step_features(args):
@@ -102,10 +132,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    valid_steps = {"all", "collect", "features", "analyze", "plot", "dashboard"}
     parser.add_argument(
-        "steps", nargs="*", default=["all"],
-        choices=["all", "collect", "features", "analyze", "plot", "dashboard"],
-        help="Which pipeline step(s) to run (default: all)",
+        "steps", nargs="*", default=[],
+        help="Which pipeline step(s) to run: all, collect, features, analyze, plot, dashboard (default: all)",
     )
     parser.add_argument(
         "--host", default="127.0.0.1",
@@ -135,24 +165,34 @@ def main():
         "--max-iterations", type=int, default=50,
         help="Max snowball sampling iterations (default: 50)",
     )
+    parser.add_argument(
+        "--refresh-every", type=int, default=20,
+        help="Refresh analysis every N new PGN downloads (default: 20)",
+    )
 
     args = parser.parse_args()
 
-    steps = args.steps
+    steps = args.steps if args.steps else ["all"]
+    for s in steps:
+        if s not in valid_steps:
+            parser.error(f"invalid step: {s!r} (choose from {', '.join(sorted(valid_steps))})")
     if "all" in steps:
-        steps = ["collect", "features", "analyze", "plot"]
-
-    step_funcs = {
-        "collect": step_collect,
-        "features": step_features,
-        "analyze": step_analyze,
-        "plot": step_plot,
-        "dashboard": step_dashboard,
-    }
-
-    for step_name in steps:
-        step_funcs[step_name](args)
-        print()
+        # In 'all' mode, run collect with live refresh, then a final analysis pass
+        step_collect(args, live=True)
+        step_features(args)
+        step_analyze(args)
+        step_plot(args)
+    else:
+        step_funcs = {
+            "collect": lambda a: step_collect(a, live=False),
+            "features": step_features,
+            "analyze": step_analyze,
+            "plot": step_plot,
+            "dashboard": step_dashboard,
+        }
+        for step_name in steps:
+            step_funcs[step_name](args)
+            print()
 
     print("=" * 60)
     print("Pipeline complete!")

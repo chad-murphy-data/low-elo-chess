@@ -1,0 +1,37 @@
+{
+    "elo_target": 500,
+    "label": "Stonefish 500",
+
+    "hazard_plateau": 0.267,
+    "equal_pos_blunder_rate": 0.224,
+    "winning_multiplier": 1.41,
+    "losing_multiplier": 1.32,
+    "first_blunder_threshold_move": 6,
+
+    "attention_decay_window": 3,
+    "attention_decay_label": "fast",
+
+    "miss_opponent_blunder_rate": 0.65,
+
+    "check_impulse": "high",
+    "scholars_mate_rate": 0.10,
+    "repeat_piece_bias": 0.51,
+
+    "maia_sampling": {
+        "strategy": "lower_half_top_5",
+        "description": "Weight toward positions 4-5 of Maia top-5",
+        "weights": [0.05, 0.10, 0.15, 0.30, 0.40]
+    },
+
+    "blunder_magnitude_weights": {
+        "low": 0.45,
+        "mid": 0.35,
+        "high": 0.20
+    },
+
+    "mechanism_weights": {
+        "walk_in": 0.65,
+        "ignored_threat": 0.30,
+        "backwards_knight": 0.05
+    }
+}

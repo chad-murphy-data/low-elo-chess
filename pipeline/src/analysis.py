@@ -2,10 +2,10 @@
 Statistical analysis: logistic regression models and hypothesis tests.
 
 Produces:
-- Model comparisons (ELO-only baseline → full model)
+- Model comparisons (ELO-only baseline -> full model)
 - Coefficient tables with p-values
 - AUC scores
-- Specific hypothesis tests (complexity, recency, move distance)
+- Specific hypothesis tests (complexity, SEE, move distance)
 """
 
 import os
@@ -23,7 +23,7 @@ def load_analysis_data(csv_path="data/moves_features.csv"):
     """Load and clean the dataset for analysis.
 
     Drops rows with missing evals, excludes near-mate positions,
-    and adds derived columns.
+    and derives blunder labels from centipawn_loss.
     """
     df = pd.read_csv(csv_path)
 
@@ -33,17 +33,20 @@ def load_analysis_data(csv_path="data/moves_features.csv"):
     # Exclude near-mate positions
     df = df[df["is_near_mate"] != True].copy()
 
-    # Exclude rows where blunder label is missing
-    df = df.dropna(subset=["is_blunder"])
+    # Derive blunder labels from centipawn_loss
+    df["is_blunder"] = (df["centipawn_loss"] > 100).astype(int)
+    df["is_mistake"] = (df["centipawn_loss"] > 50).astype(int)
+    df["is_inaccuracy"] = (df["centipawn_loss"] > 25).astype(int)
 
     # Convert booleans
     bool_cols = [
-        "is_blunder", "is_mistake", "is_inaccuracy",
-        "in_check", "has_hanging_piece_before", "created_hanging_piece",
-        "opponent_had_hanging_piece", "is_capture", "is_check_given",
+        "in_check", "is_capture", "is_check_given",
+        "piece_is_defended", "is_executing_pattern",
+        "is_two_move_attack_target",
     ]
     for col in bool_cols:
-        df[col] = df[col].astype(bool).astype(int)
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
     # Add ELO band column
     def elo_band(elo):
@@ -88,7 +91,7 @@ def load_analysis_data(csv_path="data/moves_features.csv"):
 
 
 def run_logistic_models(df, results_dir="results"):
-    """Run the three-model comparison: baseline → context → full.
+    """Run the three-model comparison: baseline -> context -> full.
 
     Returns a dict of model results and writes summary to file.
     """
@@ -120,12 +123,12 @@ def run_logistic_models(df, results_dir="results"):
         ("Model 2: ELO + context", context_features),
         ("Model 3: ELO + context + position", position_features),
         ("Model 4: Full model", full_features),
-        ("Model 5: Full + ELO×complexity interaction", interaction_features),
+        ("Model 5: Full + ELOxcomplexity interaction", interaction_features),
     ]:
-        output_lines.append(f"\n{'─' * 60}")
+        output_lines.append(f"\n{'-' * 60}")
         output_lines.append(f"  {name}")
         output_lines.append(f"  Features: {features}")
-        output_lines.append(f"{'─' * 60}")
+        output_lines.append(f"{'-' * 60}")
 
         # Drop rows with missing values in the features we need
         subset = df.dropna(subset=features + [target])
@@ -207,7 +210,7 @@ def run_logistic_models(df, results_dir="results"):
     # Write summary
     summary_text = "\n".join(output_lines)
     summary_path = results_path / "model_summary.txt"
-    with open(summary_path, "w") as f:
+    with open(summary_path, "w", encoding="utf-8") as f:
         f.write(summary_text)
     print(f"Model summary saved to {summary_path}")
     print(summary_text)
@@ -220,9 +223,9 @@ def run_hypothesis_tests(df, results_dir="results"):
 
     Tests:
     1. Does complexity moderate blunder rate beyond ELO?
-    2. Does piece recency predict hung pieces?
-    3. Does recency predict missed captures?
-    4. Does move distance vary by ELO band?
+    2. Does SEE value predict blunder severity for undefended pieces?
+    3. Does move distance vary by ELO band?
+    4. Do undefended pieces blunder more than defended ones?
     """
     results_path = Path(results_dir)
     results_path.mkdir(parents=True, exist_ok=True)
@@ -232,7 +235,7 @@ def run_hypothesis_tests(df, results_dir="results"):
     lines.append("HYPOTHESIS TESTS")
     lines.append("=" * 70)
 
-    # --- Test 1: Complexity × ELO interaction ---
+    # --- Test 1: Complexity x ELO interaction ---
     lines.append("\n\n--- Test 1: Does position complexity moderate blunder rate "
                  "beyond ELO? ---")
     subset = df.dropna(subset=["player_elo", "num_legal_moves", "is_blunder"])
@@ -252,96 +255,57 @@ def run_hypothesis_tests(df, results_dir="results"):
             lines.append("")
             if result.pvalues["elo_x_legal_moves"] < 0.05:
                 direction = "negative" if result.params["elo_x_legal_moves"] < 0 else "positive"
-                lines.append(f"  FINDING: Significant {direction} ELO×complexity interaction.")
+                lines.append(f"  FINDING: Significant {direction} ELOxcomplexity interaction.")
                 if direction == "negative":
-                    lines.append("  → Low-ELO players are disproportionately hurt "
+                    lines.append("  -> Low-ELO players are disproportionately hurt "
                                  "by complex positions.")
                 else:
-                    lines.append("  → Higher-ELO players are more affected by complexity "
+                    lines.append("  -> Higher-ELO players are more affected by complexity "
                                  "(unexpected).")
             else:
-                lines.append("  FINDING: No significant ELO×complexity interaction.")
+                lines.append("  FINDING: No significant ELOxcomplexity interaction.")
         except Exception as e:
             lines.append(f"  Error: {e}")
 
-    # --- Test 2: Piece recency predicts hung pieces ---
-    lines.append("\n\n--- Test 2: Does piece recency predict hung piece creation? ---")
-    hung_subset = df[df["created_hanging_piece"] == 1].dropna(
-        subset=["hung_piece_recency", "centipawn_loss"]
-    )
-    if len(hung_subset) > 30:
-        lines.append(f"  N (moves that created hanging pieces) = {len(hung_subset)}")
-        corr = hung_subset["hung_piece_recency"].corr(hung_subset["centipawn_loss"])
-        lines.append(f"  Correlation(hung_piece_recency, centipawn_loss) = {corr:.4f}")
+    # --- Test 2: SEE value predicts blunder severity for undefended pieces ---
+    lines.append("\n\n--- Test 2: Does SEE value predict blunder severity "
+                 "for undefended pieces? ---")
+    if "hanging_piece_net_value" in df.columns:
+        undefended = df[df["hanging_piece_net_value"].notna()].copy()
+        if len(undefended) > 30:
+            lines.append(f"  N (undefended pieces with SEE > 0) = {len(undefended)}")
+            lines.append(f"  Mean SEE value: {undefended['hanging_piece_net_value'].mean():.2f}")
+            lines.append(f"  Blunder rate (undefended): {undefended['is_blunder'].mean():.3f}")
 
-        # Simple regression
-        X = sm.add_constant(hung_subset[["hung_piece_recency"]].astype(float))
-        y = hung_subset["centipawn_loss"].astype(float)
-        try:
-            ols = sm.OLS(y, X).fit()
-            coef = ols.params["hung_piece_recency"]
-            pval = ols.pvalues["hung_piece_recency"]
-            sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else "ns"
-            lines.append(f"  OLS: coef={coef:.4f}, p={pval:.4f} ({sig})")
-            if pval < 0.05 and coef > 0:
-                lines.append("  FINDING: Higher recency → larger blunders when hanging pieces.")
-                lines.append("  → Pieces out of the player's 'attentional model' get hung worse.")
-            else:
-                lines.append("  FINDING: Piece recency does not significantly predict "
-                             "hung piece severity.")
-        except Exception as e:
-            lines.append(f"  Error: {e}")
-    else:
-        lines.append(f"  Insufficient data ({len(hung_subset)} obs)")
+            defended = df[df["piece_is_defended"] == 1]
+            if len(defended) > 30:
+                lines.append(f"  Blunder rate (defended): {defended['is_blunder'].mean():.3f}")
 
-    # --- Test 3: Recency predicts missed captures ---
-    lines.append("\n\n--- Test 3: Does recency predict missed captures? ---")
-    opp_hanging = df[df["opponent_had_hanging_piece"] == 1].copy()
-    if len(opp_hanging) > 30:
-        opp_hanging["captured_it"] = opp_hanging["is_capture"].astype(int)
-        opp_hanging_with_recency = opp_hanging.dropna(subset=["missed_capture_recency"])
+            # Does SEE predict CPL?
+            see_subset = undefended.dropna(subset=["hanging_piece_net_value", "centipawn_loss"])
+            if len(see_subset) > 30:
+                corr = see_subset["hanging_piece_net_value"].corr(see_subset["centipawn_loss"])
+                lines.append(f"  Correlation(SEE, centipawn_loss) = {corr:.4f}")
 
-        lines.append(f"  N (positions with opponent hanging piece) = {len(opp_hanging)}")
-        lines.append(f"  Capture rate: {opp_hanging['captured_it'].mean():.3f}")
-
-        if len(opp_hanging_with_recency) > 30:
-            # Among those who didn't capture, what's the recency of missed pieces?
-            missed = opp_hanging_with_recency[opp_hanging_with_recency["captured_it"] == 0]
-            captured = opp_hanging_with_recency[opp_hanging_with_recency["captured_it"] == 1]
-
-            if len(missed) > 5 and len(captured) > 5:
-                lines.append(f"  Mean recency when captured: "
-                             f"{captured['missed_capture_recency'].mean():.1f} plies (N/A — "
-                             f"using opponent piece recency)")
-                lines.append(f"  Mean recency when missed: "
-                             f"{missed['missed_capture_recency'].mean():.1f} plies")
-
-            # Logistic: does recency predict whether player captures?
-            X = sm.add_constant(
-                opp_hanging.dropna(subset=["missed_capture_recency"])[
-                    ["missed_capture_recency", "player_elo"]
-                ].astype(float)
-            )
-            y = opp_hanging.dropna(subset=["missed_capture_recency"])[
-                "captured_it"
-            ].astype(int)
-            if len(y) > 30:
+                X = sm.add_constant(see_subset[["hanging_piece_net_value"]].astype(float))
+                y = see_subset["centipawn_loss"].astype(float)
                 try:
-                    result = sm.Logit(y, X).fit(disp=0)
-                    for feat in ["missed_capture_recency", "player_elo"]:
-                        coef = result.params[feat]
-                        pval = result.pvalues[feat]
-                        sig = ("***" if pval < 0.001 else "**" if pval < 0.01
-                               else "*" if pval < 0.05 else "ns")
-                        lines.append(f"  Logit({feat}→captured): coef={coef:.5f}, "
-                                     f"p={pval:.4f} ({sig})")
+                    ols = sm.OLS(y, X).fit()
+                    coef = ols.params["hanging_piece_net_value"]
+                    pval = ols.pvalues["hanging_piece_net_value"]
+                    sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else "ns"
+                    lines.append(f"  OLS: coef={coef:.4f}, p={pval:.4f} ({sig})")
+                    if pval < 0.05 and coef > 0:
+                        lines.append("  FINDING: Higher SEE -> larger centipawn loss.")
                 except Exception as e:
                     lines.append(f"  Error: {e}")
+        else:
+            lines.append(f"  Insufficient data ({len(undefended)} obs)")
     else:
-        lines.append(f"  Insufficient data ({len(opp_hanging)} obs)")
+        lines.append("  Column hanging_piece_net_value not found in dataset")
 
-    # --- Test 4: Move distance by ELO band ---
-    lines.append("\n\n--- Test 4: Does move distance vary by ELO band? ---")
+    # --- Test 3: Move distance by ELO band ---
+    lines.append("\n\n--- Test 3: Does move distance vary by ELO band? ---")
     dist_data = df.dropna(subset=["move_distance", "elo_band"])
     if len(dist_data) > 100:
         dist_by_band = dist_data.groupby("elo_band")["move_distance"].agg(
@@ -363,7 +327,7 @@ def run_hypothesis_tests(df, results_dir="results"):
                 pval = result.pvalues["move_distance"]
                 sig = ("***" if pval < 0.001 else "**" if pval < 0.01
                        else "*" if pval < 0.05 else "ns")
-                lines.append(f"\n  Logit(move_distance→blunder | ELO): "
+                lines.append(f"\n  Logit(move_distance->blunder | ELO): "
                              f"coef={coef:.5f}, p={pval:.4f} ({sig})")
                 if pval < 0.05 and coef > 0:
                     lines.append("  FINDING: Longer-distance moves are riskier "
@@ -371,13 +335,33 @@ def run_hypothesis_tests(df, results_dir="results"):
             except Exception as e:
                 lines.append(f"  Error: {e}")
 
+    # --- Test 4: Defended vs undefended pieces ---
+    lines.append("\n\n--- Test 4: Do undefended pieces blunder more? ---")
+    if "piece_is_defended" in df.columns:
+        defended = df[df["piece_is_defended"] == 1]
+        undefended = df[df["piece_is_defended"] == 0]
+        if len(defended) > 100 and len(undefended) > 100:
+            def_rate = defended["is_blunder"].mean()
+            undef_rate = undefended["is_blunder"].mean()
+            lines.append(f"  Defended pieces blunder rate: {def_rate:.3f} (N={len(defended):,})")
+            lines.append(f"  Undefended pieces blunder rate: {undef_rate:.3f} (N={len(undefended):,})")
+            lines.append(f"  Difference: {undef_rate - def_rate:+.3f}")
+
+            # By ELO band
+            for band in ["500-700", "700-900", "900-1100", "1100-1300", "1300-1500"]:
+                bd = df[df["elo_band"] == band]
+                bd_def = bd[bd["piece_is_defended"] == 1]["is_blunder"].mean()
+                bd_undef = bd[bd["piece_is_defended"] == 0]["is_blunder"].mean()
+                lines.append(f"    {band}: defended={bd_def:.3f}, undefended={bd_undef:.3f}, "
+                             f"gap={bd_undef - bd_def:+.3f}")
+
     # --- Descriptive: Blunder rate by ELO band ---
     lines.append("\n\n--- Descriptive: Blunder rate by ELO band ---")
     blunder_by_band = df.groupby("elo_band")["is_blunder"].agg(["mean", "count"])
     for band, row in blunder_by_band.iterrows():
         lines.append(f"  {band}: blunder_rate={row['mean']:.3f}, n={int(row['count'])}")
 
-    # --- Descriptive: Blunder rate by move number ---
+    # --- Descriptive: Blunder rate by game phase ---
     lines.append("\n\n--- Descriptive: Blunder rate by game phase ---")
     df_with_mn = df.dropna(subset=["move_number"])
     if len(df_with_mn) > 0:
@@ -395,21 +379,11 @@ def run_hypothesis_tests(df, results_dir="results"):
             lines.append(f"  {phase}: blunder_rate={row['mean']:.3f}, "
                          f"n={int(row['count'])}")
 
-    # --- Descriptive: Hanging piece punishment rate by ELO ---
-    lines.append("\n\n--- Descriptive: Hanging piece punishment rate by ELO band ---")
-    opp_hanging = df[df["opponent_had_hanging_piece"] == 1].copy()
-    if len(opp_hanging) > 0:
-        opp_hanging["punished"] = opp_hanging["is_capture"].astype(int)
-        punishment = opp_hanging.groupby("elo_band")["punished"].agg(["mean", "count"])
-        for band, row in punishment.iterrows():
-            lines.append(f"  {band}: punishment_rate={row['mean']:.3f}, "
-                         f"n={int(row['count'])}")
-
     hypothesis_text = "\n".join(lines)
 
     # Append to model summary
     summary_path = results_path / "model_summary.txt"
-    with open(summary_path, "a") as f:
+    with open(summary_path, "a", encoding="utf-8") as f:
         f.write("\n\n")
         f.write(hypothesis_text)
     print(hypothesis_text)
@@ -431,7 +405,7 @@ def generate_findings(df, models, results_dir="results"):
     n_games = df["game_id"].nunique()
     lines.append(f"- **Total games:** {n_games:,}")
 
-    blunder_rate = df[df["is_blunder"].notna()]["is_blunder"].mean()
+    blunder_rate = df["is_blunder"].mean()
     lines.append(f"- **Overall blunder rate (CPL > 100):** {blunder_rate:.1%}")
 
     lines.append("")
@@ -473,7 +447,7 @@ def generate_findings(df, models, results_dir="results"):
             if feat == "const":
                 continue
             if result.pvalues[feat] < 0.05:
-                direction = "+" if result.params[feat] > 0 else "−"
+                direction = "+" if result.params[feat] > 0 else "-"
                 significant_features.append((feat, direction, result.pvalues[feat]))
 
         if significant_features:
@@ -489,7 +463,7 @@ def generate_findings(df, models, results_dir="results"):
 
     findings_text = "\n".join(lines)
     findings_path = results_path / "findings.md"
-    with open(findings_path, "w") as f:
+    with open(findings_path, "w", encoding="utf-8") as f:
         f.write(findings_text)
     print(f"Findings saved to {findings_path}")
 

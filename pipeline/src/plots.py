@@ -5,8 +5,8 @@ Produces:
 1. Blunder rate by ELO band
 2. Blunder rate by clock remaining × ELO band
 3. Centipawn loss by move distance
-4. Hung piece rate by piece recency
-5. Missed capture rate by hanging piece recency
+4. Blunder rate by move number
+5. Defended vs undefended blunder rate by ELO
 """
 
 from pathlib import Path
@@ -133,92 +133,6 @@ def plot_cpl_by_move_distance(df, fig_dir):
     _save(fig, fig_dir / "cpl_by_move_distance.png")
 
 
-def plot_hung_piece_by_recency(df, fig_dir):
-    """Bar chart: rate of creating hanging pieces by piece recency bins."""
-    subset = df.dropna(subset=["moves_since_piece_last_moved"])
-    if len(subset) == 0:
-        print("  Skipping recency plot: no recency data")
-        return
-
-    subset = subset.copy()
-    subset["recency_bin"] = pd.cut(
-        subset["moves_since_piece_last_moved"],
-        bins=[0, 2, 5, 10, 20, 200],
-        labels=["0-2", "3-5", "6-10", "11-20", "21+"],
-        right=True,
-    )
-
-    rates = (
-        subset.groupby("recency_bin", observed=True)["created_hanging_piece"]
-        .agg(["mean", "count", "sem"])
-        .dropna()
-    )
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    bars = ax.bar(
-        rates.index, rates["mean"], yerr=rates["sem"] * 1.96,
-        capsize=4, color=sns.color_palette("rocket", len(rates)),
-        edgecolor="black", linewidth=0.5,
-    )
-
-    for bar, (_, row) in zip(bars, rates.iterrows()):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.002,
-            f"n={int(row['count']):,}", ha="center", va="bottom", fontsize=8,
-        )
-
-    ax.set_xlabel("Plies Since Piece Last Moved")
-    ax.set_ylabel("Rate of Creating Hanging Piece")
-    ax.set_title("Hanging Piece Creation Rate by Piece Recency")
-
-    _save(fig, fig_dir / "hung_piece_by_recency.png")
-
-
-def plot_missed_capture_by_recency(df, fig_dir):
-    """Bar chart: missed capture rate by how long ago the hanging piece moved."""
-    opp_hanging = df[df["opponent_had_hanging_piece"] == 1].copy()
-    opp_hanging = opp_hanging.dropna(subset=["missed_capture_recency"])
-
-    if len(opp_hanging) < 30:
-        print("  Skipping missed capture plot: insufficient data")
-        return
-
-    opp_hanging["captured_it"] = opp_hanging["is_capture"].astype(int)
-    opp_hanging["missed_it"] = 1 - opp_hanging["captured_it"]
-
-    opp_hanging["recency_bin"] = pd.cut(
-        opp_hanging["missed_capture_recency"],
-        bins=[0, 2, 5, 10, 20, 200],
-        labels=["0-2", "3-5", "6-10", "11-20", "21+"],
-        right=True,
-    )
-
-    rates = (
-        opp_hanging.groupby("recency_bin", observed=True)["missed_it"]
-        .agg(["mean", "count", "sem"])
-        .dropna()
-    )
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    bars = ax.bar(
-        rates.index, rates["mean"], yerr=rates["sem"] * 1.96,
-        capsize=4, color=sns.color_palette("mako", len(rates)),
-        edgecolor="black", linewidth=0.5,
-    )
-
-    for bar, (_, row) in zip(bars, rates.iterrows()):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
-            f"n={int(row['count']):,}", ha="center", va="bottom", fontsize=8,
-        )
-
-    ax.set_xlabel("Plies Since Hanging Piece Last Moved")
-    ax.set_ylabel("Miss Rate (did NOT capture)")
-    ax.set_title("Missed Capture Rate by Hanging Piece Recency\n(Availability Heuristic Test)")
-
-    _save(fig, fig_dir / "missed_capture_by_recency.png")
-
-
 def plot_blunder_rate_by_move_number(df, fig_dir):
     """Line chart: blunder rate by move number, colored by ELO band."""
     subset = df.dropna(subset=["move_number", "is_blunder", "elo_band"])
@@ -248,41 +162,35 @@ def plot_blunder_rate_by_move_number(df, fig_dir):
     _save(fig, fig_dir / "blunder_by_move_number.png")
 
 
-def plot_punishment_rate_by_elo(df, fig_dir):
-    """Bar chart: hanging piece punishment rate by ELO band."""
-    opp_hanging = df[df["opponent_had_hanging_piece"] == 1].copy()
-    if len(opp_hanging) < 30:
-        print("  Skipping punishment plot: insufficient data")
+def plot_defended_vs_undefended(df, fig_dir):
+    """Grouped bar chart: blunder rate for defended vs undefended pieces by ELO."""
+    if "piece_is_defended" not in df.columns:
+        print("  Skipping defended/undefended plot: column missing")
         return
 
-    opp_hanging["punished"] = opp_hanging["is_capture"].astype(int)
-
-    rates = (
-        opp_hanging.groupby("elo_band")["punished"]
-        .agg(["mean", "count", "sem"])
-        .reindex(ELO_BAND_ORDER)
-        .dropna()
+    subset = df.dropna(subset=["piece_is_defended", "elo_band"]).copy()
+    subset["defended"] = subset["piece_is_defended"].apply(
+        lambda x: "Defended" if x else "Undefended"
     )
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    bars = ax.bar(
-        rates.index, rates["mean"], yerr=rates["sem"] * 1.96,
-        capsize=4, color=PALETTE[:len(rates)],
-        edgecolor="black", linewidth=0.5,
+    pivot = (
+        subset.groupby(["elo_band", "defended"])["is_blunder"]
+        .mean()
+        .unstack(fill_value=np.nan)
     )
+    pivot = pivot.reindex(index=ELO_BAND_ORDER).dropna(how="all")
 
-    for bar, (_, row) in zip(bars, rates.iterrows()):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
-            f"n={int(row['count']):,}", ha="center", va="bottom", fontsize=8,
-        )
+    fig, ax = plt.subplots(figsize=(10, 6))
+    pivot.plot(kind="bar", ax=ax, width=0.7, edgecolor="black", linewidth=0.5,
+               color=["#2ecc71", "#e74c3c"])
 
     ax.set_xlabel("ELO Band")
-    ax.set_ylabel("Punishment Rate (captured hanging piece)")
-    ax.set_title("Hanging Piece Punishment Rate by ELO Band")
-    ax.set_ylim(0, 1)
+    ax.set_ylabel("Blunder Rate")
+    ax.set_title("Blunder Rate: Defended vs Undefended Pieces by ELO Band")
+    ax.legend(title="Piece Status")
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
 
-    _save(fig, fig_dir / "punishment_rate_by_elo.png")
+    _save(fig, fig_dir / "defended_vs_undefended.png")
 
 
 def generate_all_plots(csv_path="data/moves_features.csv", fig_dir="results/figures"):
@@ -293,19 +201,19 @@ def generate_all_plots(csv_path="data/moves_features.csv", fig_dir="results/figu
     print("Loading data for plotting...")
     df = pd.read_csv(csv_path)
 
-    # Prepare data
-    bool_cols = [
-        "is_blunder", "is_mistake", "is_inaccuracy", "is_near_mate",
-        "in_check", "has_hanging_piece_before", "created_hanging_piece",
-        "opponent_had_hanging_piece", "is_capture", "is_check_given",
-    ]
-    for col in bool_cols:
-        if col in df.columns:
-            df[col] = df[col].astype(float)  # handle NA bools
+    # Prepare data — derive is_blunder from centipawn_loss
+    df = df.dropna(subset=["eval_before", "eval_after", "centipawn_loss"])
 
     # Exclude near-mate
-    df = df[df["is_near_mate"] != 1.0]
-    df = df.dropna(subset=["is_blunder"])
+    if "is_near_mate" in df.columns:
+        df = df[df["is_near_mate"] != True]
+
+    df["is_blunder"] = (df["centipawn_loss"] > 100).astype(float)
+
+    # Convert booleans
+    for col in ["in_check", "is_capture", "is_check_given", "piece_is_defended"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # Add ELO band
     def elo_band(elo):
@@ -349,17 +257,11 @@ def generate_all_plots(csv_path="data/moves_features.csv", fig_dir="results/figu
     print("Plot 3: CPL by move distance")
     plot_cpl_by_move_distance(df, fig_path)
 
-    print("Plot 4: Hung piece rate by recency")
-    plot_hung_piece_by_recency(df, fig_path)
-
-    print("Plot 5: Missed capture rate by recency")
-    plot_missed_capture_by_recency(df, fig_path)
-
-    print("Plot 6: Blunder rate by move number")
+    print("Plot 4: Blunder rate by move number")
     plot_blunder_rate_by_move_number(df, fig_path)
 
-    print("Plot 7: Punishment rate by ELO")
-    plot_punishment_rate_by_elo(df, fig_path)
+    print("Plot 5: Defended vs undefended blunder rate")
+    plot_defended_vs_undefended(df, fig_path)
 
     print("All plots generated.")
 

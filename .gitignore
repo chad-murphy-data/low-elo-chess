@@ -4,11 +4,23 @@ __pycache__/
 .env
 venv/
 .venv/
-data/*.csv
-results/figures/*.png
-results/model_summary.txt
-results/findings.md
 *.egg-info/
 dist/
 build/
 .pytest_cache/
+
+# Engine binaries
+stockfish_dir/
+stockfish.zip
+lc0_dir/
+
+# Data
+data/
+*.csv
+
+# Tokens
+lichess.token
+
+# Pipeline data (archived)
+pipeline/*.csv
+pipeline/data/

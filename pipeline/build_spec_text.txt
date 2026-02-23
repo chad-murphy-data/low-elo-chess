@@ -1,0 +1,306 @@
+[P0] STONEFISH
+[P1] MVP1 Build Specification
+[P2] A behaviorally-grounded low-ELO chess bot. Version 0.1  —  February 2026
+[P3] 1. First Principles
+[P4] Stonefish is not a randomized bad player. It is a player with a coherent internal model that happens to be wrong in specific, predictable ways. The goal is behavioral authenticity, not statistical approximation.
+[P5] 
+[P6] 1.1 The Solitaire Chess Model
+[P7] Low-ELO players treat chess as solitaire. They have a plan, they execute it, and they model the opponent minimally. Mistakes emerge not from ignorance of the rules but from commitment to a plan that ignores new information.
+[P8] 
+[P9] The bot knows the rules. It knows pieces have value. It just has a short working memory and a strong forward bias.
+[P10] 
+[P11] 1.2 The Two-Gate Opponent Model
+[P12] After every opponent move, a 500-ELO player runs a fast threat filter before returning to their own plan:
+[P13] 
+[P14] Gate 1 — Immediate threat: Does this move check me? Does it capture something? Is there a piece now adjacent to something valuable? If yes, react.
+[P15] Gate 2 — Plan interference: Does this move directly defeat what I was about to do? If yes, adapt.
+[P16] If neither gate fires: return to solitaire. Resume the plan. File the opponent move away and forget it over the next few moves.
+[P17] 
+[P18] This is why Scholar's mate gets aborted after Nf6 — Gate 2 fires, the plan is blocked, the bot doesn't blindly continue. But it also won't find the sideline.
+[P19] 
+[P20] 1.3 The Core Constraint
+[P21] The bot can miss things that require looking ahead or scanning the full board. It cannot miss things that are immediately in front of it right now.
+[P22] 
+[P23] Formally: the bot cannot miss consequences traceable to the opponent’s last move, and cannot miss a capturing piece that is one square away from the landing square.
+[P24] 
+[P25] 2. The Attention Model
+[P26] Every candidate blunder move is scored by an attention filter before it can be selected. The filter models the bot’s working memory window.
+[P27] 
+[P28] 2.1 Hard Exclusions (probability 0)
+[P29] Landing square was covered by opponent’s last move
+[P30] Nearest capturing piece is exactly 1 square from the landing square
+[P31] Move reverses the piece to its previous square
+[P32] Move has no articulable purpose (see Section 4.2)
+[P33] 
+[P34] 2.2 Attention Decay Function
+[P35] For threats that pass the hard exclusion check, attention weight decays along two independent dimensions:
+[P36] 
+[P37] 
+[P38] A long-range piece sitting untouched for 5+ moves is essentially invisible. A piece that arrived 2 moves ago and is 4 squares away is missable but not guaranteed to be missed.
+[P39] 
+[P40] 2.3 Reasonable vs Unreasonable Blunders
+[P41] Things the bot can do:
+[P42] Hang a piece because it played a check and didn’t see the square was defended
+[P43] Capture into a defended square when attackers >= 2 (miscounted)
+[P44] Miss a long-range defender that has been passive for several moves
+[P45] Execute a fork pattern onto a defended square (saw the pattern, skipped the calculation)
+[P46] Miss checkmate in 1 or 2 (no ‘am I about to get mated’ scan running)
+[P47] Attack the opponent’s queen without noticing a defender X squares away
+[P48] 
+[P49] Things the bot cannot do:
+[P50] Move a queen adjacent to opponent’s queen with no defense and no plan
+[P51] Capture a piece that was just defended in direct response to an attack
+[P52] Play a random pawn move that leaves a major piece hanging
+[P53] Make a move that requires not knowing how pieces move
+[P54] 
+[P55] 3. Empirical Calibration Parameters
+[P56] All parameters derived from analysis of 931,000 positions across 500–1100 ELO players. Mate-score recoded (threshold: 900cp).
+[P57] 
+[P58] 3.1 Blunder Rate by ELO Band
+[P59] 
+[P60] The real ELO difference is in frequency, not severity. Avg CP on blunder: 247–283cp across all bands — a tight range. Don’t engineer blunder severity by ELO.
+[P61] 
+[P62] 3.2 Eval Context Multipliers
+[P63] Blunder probability scales with position state. Equal position is the baseline.
+[P64] 
+[P65] 
+[P66] Winning always blunders more than losing at every ELO band. Overconfidence is the mechanism. When winning + high blunder roll fires, bias toward high magnitude.
+[P67] 
+[P68] 3.3 Hazard Curve Shape
+[P69] The blunder roll probability ramps steeply through the first 20 moves then plateaus. Key parameters by ELO band:
+[P70] 
+[P71] 
+[P72] ~+1 move per 100 ELO on first blunder median. Skill delays blunders, it doesn’t prevent them. The KM hazard table gives per-move probabilities directly.
+[P73] 
+[P74] 3.4 Blunder Spacing
+[P75] After the first blunder, gap to next blunder stabilizes at median 4 moves across all ELO bands. p25 = 2 moves everywhere — clusters are common and should feel natural.
+[P76] 
+[P77] Do not impose a cooldown longer than 4 moves between blunders. Artificial spacing breaks authenticity.
+[P78] 
+[P79] 3.5 Mechanism Weights
+[P80] 
+[P81] 3.6 Repeat Piece on Blunder
+[P82] When a high-magnitude blunder roll fires, bias toward moving the same piece as last turn:
+[P83] <600: 51% of high blunders involve same piece as previous move
+[P84] 1000–1100: 40% of high blunders involve same piece
+[P85] 
+[P86] This is the interrupted plan in data form. The bot is steering a piece somewhere and steers it into disaster. It needs a purpose though — see Section 4.2.
+[P87] 
+[P88] 3.7 Parameters That Are Flat (Do Not Engineer)
+[P89] These are empirically identical across all ELO bands. Do not add ELO-specific logic for any of these:
+[P90] Piece movement distribution (rook ~26%, king ~22%, pawn ~19%, queen ~14%, knight ~10%, bishop ~9%)
+[P91] Average move distance (~1.77–1.79 everywhere)
+[P92] Capture rate (~24–26% everywhere)
+[P93] Trade frequency by phase
+[P94] 
+[P95] 4. Move Selection Pipeline
+[P96] Every move follows this decision tree in order. After the opening (move 10+).
+[P97] 
+[P98] Step 1 — Did the opponent just blunder?
+[P99] Check if opponent’s last move had cp_loss > 100
+[P100] If yes: roll miss probability (~60% at <600, ~55% at 1100)
+[P101] If miss fires: skip to Step 4, ignore what just happened
+[P102] If miss doesn’t fire: continue to Step 2 with ‘noticed something’ flag
+[P103] 
+[P104] Step 2 — Run the two-gate filter
+[P105] Gate 1: does opponent’s move check me, capture something, or threaten adjacent to a major piece?
+[P106] Gate 2: does it directly block my intended next move?
+[P107] If either gate fires: enter react mode — find a response move from Maia top 5
+[P108] If neither fires: enter solitaire mode — continue to Step 3
+[P109] 
+[P110] Step 3 — Hazard roll
+[P111] Look up per-move probability from KM hazard table for this ELO band and move number
+[P112] Apply eval context multiplier (winning/equal/losing)
+[P113] Roll against combined probability
+[P114] If roll misses: go to Step 4 (normal move)
+[P115] If roll fires: go to Step 5 (blunder selection)
+[P116] 
+[P117] Step 4 — Normal move selection
+[P118] Base move: Maia 1100, sampling from lower end of top 5 for lower ELO bots
+[P119] Apply personality overlays: forward bias toward opponent king, check impulse weight (peaks at 600–900), Scholar’s mate logic if still in opening
+[P120] Execute move
+[P121] 
+[P122] Step 5 — Magnitude roll
+[P123] Low magnitude (<200cp): most common — pick from Maia ranks 6–10, done
+[P124] Mid magnitude (200–500cp): pick from Maia ranks 8–15 with mechanism
+[P125] High magnitude (500cp+): requires mechanism + attention filter + purpose check
+[P126] 
+[P127] Step 6 — Blunder candidate generation
+[P128] Build the candidate pool from these sources:
+[P129] Maia 1100 ranks 6–15
+[P130] Maia top 5 moves that Stockfish rates significantly below best
+[P131] Good-looking-but-defended tactical moves: checks and captures that lose material
+[P132] Same piece as last turn IF it has a destination with purpose (attacking something, giving check, completing a capture sequence)
+[P133] Pattern completion moves: fork setups, back rank ideas, strong-looking checks
+[P134] 
+[P135] Apply hard exclusions (Section 2.1), then attention decay (Section 2.2), then purpose check (Section 4.2).
+[P136] 
+[P137] Step 7 — Execute and log
+[P138] Play the selected move
+[P139] Log to game database: move number, eval before/after, cp loss, hazard roll result, mechanism triggered, repeat piece flag, followed opponent blunder flag
+[P140] 
+[P141] 4.2 The Purpose Check
+[P142] Every blunder candidate must pass a one-sentence test: ‘I played that move because...’
+[P143] 
+[P144] Valid purposes:
+[P145] Attacking an opponent piece
+[P146] Giving check or threatening checkmate
+[P147] Continuing a capture sequence already started
+[P148] Completing a visible pattern (fork square, back rank)
+[P149] Escaping an attack on the current piece
+[P150] Continuing the trajectory of the same piece from last turn (with a target)
+[P151] 
+[P152] Invalid purposes (do not play):
+[P153] Queen relocating to a square with no target and no escape logic
+[P154] Pawn move that incidentally reveals a hanging major piece
+[P155] Any move where the sentence would be ‘I moved it there because...’ and nothing follows
+[P156] 
+[P157] 5. Three-Bot Architecture
+[P158] Build three bots sharing the same codebase with ELO-specific parameter files. Competition between bots is the primary calibration check.
+[P159] 
+[P160] 
+[P161] 
+[P162] 
+[P163] Competition between bots is the primary ELO validation. 500 should beat 700 rarely. 900 should beat 700 regularly. If 500 beats 900 something is broken.
+[P164] 
+[P165] 6. MVP1 Build Order
+[P166] Build incrementally. Get something playable fast, then layer complexity.
+[P167] 
+[P168] Phase 1 — Foundation
+[P169] Connect to Maia 1100 API or local model
+[P170] Get legal moves playing from any FEN position
+[P171] Implement game state tracker: current eval, move history, last piece moved, current plan
+[P172] Set up game logger (SQLite or similar) — log every move with full context
+[P173] 
+[P174] Phase 2 — Two-Gate Filter
+[P175] Implement Gate 1: detect checks, captures, adjacent threats from opponent’s last move
+[P176] Implement Gate 2: detect direct plan interference
+[P177] Implement solitaire mode vs react mode branching
+[P178] Test: bot should respond to direct threats but ignore non-threatening moves
+[P179] 
+[P180] Phase 3 — Normal Move Selector
+[P181] Sample from Maia top 5 weighted by ELO band
+[P182] Add forward bias (distance to opponent king preference)
+[P183] Add check impulse weight
+[P184] Add Scholar’s mate logic for opening
+[P185] Test baseline: what ELO does pure Maia 1100 play at? Measure empirically.
+[P186] 
+[P187] Phase 4 — Attention Filter (Critical)
+[P188] For every candidate move, compute distance to nearest capturing piece
+[P189] Flag whether any capturing piece was involved in opponent’s last move
+[P190] Implement hard exclusion checks
+[P191] Implement attention decay function f(distance) × g(recency)
+[P192] Implement purpose check for queen moves and same-piece-again moves
+[P193] 
+[P194] Phase 5 — Blunder Layer
+[P195] Load KM hazard table by ELO band
+[P196] Implement hazard roll with eval context multiplier
+[P197] Implement magnitude roll (low/mid/high)
+[P198] Build blunder candidate pool: Maia 6–15, Maia top 5 vs Stockfish, tactical patterns, same piece continuations
+[P199] Run candidates through attention filter and purpose check
+[P200] Implement blunder carry-forward: if no valid candidate found, defer to next move
+[P201] 
+[P202] Phase 6 — Calibration
+[P203] Run 500 vs 700 vs 900 bot competition (100+ games each pairing)
+[P204] Compare cumulative CP loss curves against empirical data
+[P205] Compare blunder rate by move bucket against hazard curve data
+[P206] Tune hazard plateau and attention decay parameters until relative ordering holds
+[P207] 
+[P208] 7. Future Phases (Post-MVP1)
+[P209] Puzzle trigger system: every blunder fires a puzzle about the position that just occurred
+[P210] Plan state tracking: lightweight variable tracking what the bot was trying to do across moves
+[P211] Pattern completion detection: fork geometry, back rank weakness recognition
+[P212] Mate score recoding in live eval pipeline (currently threshold-based, could be more precise)
+[P213] ELO slider: smooth interpolation between 500/700/900 parameter sets
+[P214] Opening book: 3–4 moves of King’s pawn knowledge, no sidelines
+[P215] 
+[P216] 8. What Not To Build
+[P217] These are empirically flat across ELO bands. Adding ELO-specific logic here wastes effort and may break authenticity:
+[P218] 
+[P219] Piece movement distribution weighting — it’s the same everywhere
+[P220] Move distance filtering — flat signal, not useful
+[P221] Capture rate engineering — emerges naturally from move selection
+[P222] Trade frequency logic — completely flat
+[P223] Tilt multiplier after early blunders — effect too small, hazard curve handles it
+[P224] Post-blunder cooldown longer than 4 moves — contradicted by data
+[P225] 
+[P226] The key insight from empirical analysis: the ELO difference between 500 and 1100 lives almost entirely in blunder frequency, not blunder severity, piece selection, or move style. Engineer the when, not the what.
+[P227] 
+[P228] Stonefish MVP1 Build Spec  —  Derived from empirical analysis of 931,000 positions  —  February 2026
+
+=== TABLE 0 ===
+  R0: Dimension|Hard floor|Decay
+  R1: Distance to capturing piece|1 square → excluded|Decays toward 0 as distance increases beyond 2
+  R2: Moves since threat became relevant|Last move → excluded|Decays toward 0 over 3–5 moves
+  R3: Combined weight|Either dimension can exclude|attention = f(distance) × g(recency)
+
+=== TABLE 1 ===
+  R0: ELO Band|Blunder Rate (plateau)|Equal Position Rate
+  R1: <600 (500 bot)|26.7%|22.4%
+  R2: 600–700 (700 bot)|24.4%|20.0%
+  R3: 700–800|23.4%|17.7%
+  R4: 800–900 (900 bot)|22.7%|16.3%
+  R5: 900–1000|20.3%|14.7%
+  R6: 1000–1100|20.5%|14.3%
+
+=== TABLE 2 ===
+  R0: ELO Band|Winning multiplier|Losing multiplier
+  R1: <600|31.6% (1.41× equal)|29.5% (1.32× equal)
+  R2: 600–700|27.2% (1.36× equal)|27.2% (1.36× equal)
+  R3: 800–900|24.8% (1.52× equal)|24.3% (1.49× equal)
+  R4: 900–1000|23.4% (1.59× equal)|21.8% (1.48× equal)
+
+=== TABLE 3 ===
+  R0: ELO Band|First blunder threshold|Plateau begins
+  R1: <600|Move 6 (p25)|Move 20–25
+  R2: 600–700|Move 6 (p25)|Move 20–25
+  R3: 700–800|Move 7 (p25)|Move 20–25
+  R4: 800–900|Move 8 (p25)|Move 20–25
+  R5: 900–1000|Move 9 (p25)|Move 20–25
+  R6: 1000–1100|Move 10 (p25)|Move 20–25
+
+=== TABLE 4 ===
+  R0: Mechanism|Weight|Description
+  R1: Walk-in|~65%|Moved piece ends up undefended on a square with attackers
+  R2: Ignored threat|~30%|Attacker existed, bot continued plan anyway
+  R3: Backwards knight|~5%|Retreating knight move that costs material
+
+=== TABLE 5 ===
+  R0: 500 ELO Bot Parameters|500 ELO Bot Parameters
+  R1: Hazard plateau|26.7%
+  R2: Equal pos blunder rate|22.4%
+  R3: Winning multiplier|1.41×
+  R4: First blunder threshold|Move 6
+  R5: Attention decay rate|Fast — 3 move window
+  R6: Miss after opponent blunder|~65%
+  R7: Check impulse|High (personality boost)
+  R8: Scholar’s mate rate|~10% as white (nudged up)
+  R9: Repeat piece bias on high blunder|51%
+  R10: Maia sampling|Lower half of top 5
+
+=== TABLE 6 ===
+  R0: 700 ELO Bot Parameters|700 ELO Bot Parameters
+  R1: Hazard plateau|24.4%
+  R2: Equal pos blunder rate|20.0%
+  R3: Winning multiplier|1.36×
+  R4: First blunder threshold|Move 7
+  R5: Attention decay rate|Medium — 4 move window
+  R6: Miss after opponent blunder|~62%
+  R7: Check impulse|Medium-high
+  R8: Scholar’s mate rate|~8% as white
+  R9: Repeat piece bias on high blunder|47%
+  R10: Maia sampling|Middle of top 5
+
+=== TABLE 7 ===
+  R0: 900 ELO Bot Parameters|900 ELO Bot Parameters
+  R1: Hazard plateau|22.7%
+  R2: Equal pos blunder rate|16.3%
+  R3: Winning multiplier|1.52×
+  R4: First blunder threshold|Move 8
+  R5: Attention decay rate|Slower — 5 move window
+  R6: Miss after opponent blunder|~58%
+  R7: Check impulse|Medium
+  R8: Scholar’s mate rate|~6% as white
+  R9: Repeat piece bias on high blunder|44%
+  R10: Maia sampling|Upper half of top 5
+

@@ -101,29 +101,35 @@ def find_elo_band(elo):
 
 
 def seed_users_from_autocomplete(search_terms=None):
-    """Find seed users via Lichess player autocomplete."""
+    """Find seed users via Lichess player autocomplete.
+
+    Uses a small set of search terms and limits rating lookups to keep
+    the seeding phase fast (~30s instead of minutes).
+    """
     if search_terms is None:
-        # Use a variety of short terms to get diverse users
-        search_terms = [
-            "ch", "ki", "pa", "ma", "jo", "da", "an", "mi",
-            "sa", "al", "ra", "to", "be", "ca", "de", "el",
-            "fi", "ga", "ha", "in", "ja", "ka", "la", "na",
-        ]
+        # Small diverse set — we only need a handful of seeds,
+        # the snowball will discover the rest
+        search_terms = ["chess", "king", "pawn", "rook", "blitz", "fish"]
 
     users = {}  # username -> rating
     print("Finding seed users via autocomplete...")
     for term in search_terms:
         resp = _api_get(
             "/api/player/autocomplete",
-            params={"term": term, "object": "true", "nb": 15},
+            params={"term": term, "object": "true", "nb": 10},
             accept="application/json",
         )
         if resp is None:
             continue
         try:
-            results = resp.json()
+            data = resp.json()
+            # API returns {"result": [...]} when object=true, or [...] otherwise
+            results = data.get("result", data) if isinstance(data, dict) else data
             for user in results:
-                username = user.get("id", user.get("name", ""))
+                if isinstance(user, str):
+                    username = user.lower()
+                else:
+                    username = user.get("id", user.get("name", ""))
                 if not username:
                     continue
                 # We need to look up their actual blitz rating
@@ -137,8 +143,13 @@ def seed_users_from_autocomplete(search_terms=None):
                 if band is not None:
                     users[username] = rating
                     print(f"  Seed: {username} (blitz {rating})")
+                # Stop early once we have a few seeds — snowball will find the rest
+                if len(users) >= 8:
+                    break
         except (json.JSONDecodeError, KeyError, TypeError):
             continue
+        if len(users) >= 8:
+            break
 
     return users
 
@@ -223,7 +234,8 @@ def load_checkpoint(checkpoint_path):
 
 
 def collect_data(data_dir="data", target_users=TARGET_USERS_PER_BAND,
-                 target_games=TARGET_GAMES_PER_USER, max_iterations=50):
+                 target_games=TARGET_GAMES_PER_USER, max_iterations=50,
+                 on_new_games=None, refresh_every=20):
     """
     Main collection loop. Snowball samples users by ELO band and downloads
     their games.
@@ -233,11 +245,26 @@ def collect_data(data_dir="data", target_users=TARGET_USERS_PER_BAND,
         target_users: Target number of users per ELO band
         target_games: Number of games to download per user
         max_iterations: Maximum snowball iterations to prevent infinite loops
+        on_new_games: Optional callback(data_dir) called after every refresh_every new PGN downloads
+        refresh_every: How many new PGN downloads between callback invocations (default: 20)
     """
     data_path = Path(data_dir)
     games_dir = data_path / "pgn"
     games_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = data_path / "collection_checkpoint.json"
+    _new_downloads_since_refresh = 0
+
+    def _maybe_refresh():
+        nonlocal _new_downloads_since_refresh
+        _new_downloads_since_refresh += 1
+        if on_new_games and _new_downloads_since_refresh >= refresh_every:
+            pgn_count = len(list(games_dir.glob("*.pgn")))
+            print(f"\n--- Incremental refresh ({pgn_count} PGN files) ---")
+            try:
+                on_new_games(data_dir)
+            except Exception as e:
+                print(f"  Refresh error: {e}")
+            _new_downloads_since_refresh = 0
 
     # Try to resume from checkpoint
     checkpoint = load_checkpoint(checkpoint_path)
@@ -295,8 +322,7 @@ def collect_data(data_dir="data", target_users=TARGET_USERS_PER_BAND,
                 print("No more unprocessed users. Need more seeds.")
                 # Try to get more seeds
                 extra_seeds = seed_users_from_autocomplete(
-                    [f"{chr(a)}{chr(b)}" for a in range(ord('a'), ord('z'))
-                     for b in range(ord('a'), ord('d'))][:20]
+                    ["knight", "queen", "bishop", "castle", "game", "play"]
                 )
                 for username, rating in extra_seeds.items():
                     band = find_elo_band(rating)
@@ -318,7 +344,7 @@ def collect_data(data_dir="data", target_users=TARGET_USERS_PER_BAND,
         # Download games
         pgn_file = games_dir / f"{username}.pgn"
         if pgn_file.exists():
-            with open(pgn_file) as f:
+            with open(pgn_file, encoding="utf-8", errors="replace") as f:
                 pgn_text = f.read()
         else:
             pgn_text = download_user_games(username, max_games=target_games)
@@ -326,8 +352,9 @@ def collect_data(data_dir="data", target_users=TARGET_USERS_PER_BAND,
                 print(f"  No games found for {username}")
                 iteration += 1
                 continue
-            with open(pgn_file, "w") as f:
+            with open(pgn_file, "w", encoding="utf-8") as f:
                 f.write(pgn_text)
+            _maybe_refresh()
 
         # Discover opponents
         all_known = set()
@@ -366,8 +393,9 @@ def collect_data(data_dir="data", target_users=TARGET_USERS_PER_BAND,
         print(f"  [{i+1}/{len(all_users_to_download)}] Downloading {username}...")
         pgn_text = download_user_games(username, max_games=target_games)
         if pgn_text and len(pgn_text.strip()) > 0:
-            with open(pgn_file, "w") as f:
+            with open(pgn_file, "w", encoding="utf-8") as f:
                 f.write(pgn_text)
+            _maybe_refresh()
 
         if i % 20 == 0:
             save_checkpoint(
