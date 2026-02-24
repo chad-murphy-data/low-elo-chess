@@ -87,7 +87,7 @@ class GameLogger:
     def open(self) -> None:
         """Open database connection and ensure tables exist."""
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path)
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute(CREATE_GAMES_TABLE)
         self._conn.execute(CREATE_MOVES_TABLE)

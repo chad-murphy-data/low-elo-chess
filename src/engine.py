@@ -123,6 +123,10 @@ class MaiaEngine:
                 continue
             move = pv[0]
 
+            # Force all promotions to queen (Maia sometimes picks knight/rook/bishop)
+            if move.promotion is not None and move.promotion != chess.QUEEN:
+                move = chess.Move(move.from_square, move.to_square, promotion=chess.QUEEN)
+
             # Extract raw score (usually identical across ranks at nodes=1)
             score = info.get("score", None)
             cp = 0

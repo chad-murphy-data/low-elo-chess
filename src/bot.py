@@ -113,6 +113,22 @@ class StonefishBot:
         board = game_state.board
         bot_color = game_state.bot_color
 
+        # ============================================================
+        # Step 0: Obvious recapture override
+        # ============================================================
+        # If opponent just captured one of our pieces and we can take
+        # back on that square with an adjacent piece (distance <= 1),
+        # always recapture. This is unmissable for any human.
+        obvious = self._find_obvious_recapture(game_state)
+        if obvious is not None:
+            return obvious, {
+                "mechanism": "obvious_recapture",
+                "maia_rank": None,
+                "maia_top5": [],
+                "mode": "forced",
+                "notes": f"Obvious recapture on {chess.square_name(obvious.to_square)}",
+            }
+
         # --- Get Maia candidates ---
         maia_moves = self._maia.get_top_n_moves(board, n=5)
 
@@ -212,6 +228,81 @@ class StonefishBot:
                 f"Solitaire mode. Personality-weighted rank {selected_rank}."
             ),
         }
+
+    # ------------------------------------------------------------------
+    # Phase 0: Obvious recapture
+    # ------------------------------------------------------------------
+
+    def _find_obvious_recapture(
+        self, game_state: GameState
+    ) -> Optional[chess.Move]:
+        """Check if there's an obvious recapture that any human would play.
+
+        Conditions (ALL must be true):
+        1. Opponent's last move was a capture.
+        2. We have a legal capture back on that same square.
+        3. The recapturing piece is adjacent (Chebyshev distance <= 1)
+           to the capture square.
+        4. The recapture doesn't lose material (captured piece value >=
+           recapturing piece value, OR the square is undefended after).
+
+        Returns:
+            The obvious recapture Move, or None.
+        """
+        board = game_state.board
+        bot_color = game_state.bot_color
+        opp_last = game_state.get_opponent_last_move()
+
+        if opp_last is None or not opp_last.is_capture:
+            return None
+
+        target_sq = opp_last.to_square
+
+        # What piece did opponent land with?
+        opp_piece = board.piece_at(target_sq)
+        if opp_piece is None:
+            return None
+        opp_value = PIECE_VALUES.get(opp_piece.piece_type, 0)
+
+        # Find all our legal captures on that square
+        best_move = None
+        best_value_diff = -999  # higher = better trade for us
+
+        for move in board.legal_moves:
+            if move.to_square != target_sq:
+                continue
+            if not board.is_capture(move):
+                continue
+
+            our_piece = board.piece_at(move.from_square)
+            if our_piece is None or our_piece.color != bot_color:
+                continue
+
+            dist = chebyshev_distance(move.from_square, target_sq)
+            if dist > 1:
+                continue
+
+            our_value = PIECE_VALUES.get(our_piece.piece_type, 0)
+            value_diff = opp_value - our_value  # positive = good trade
+
+            # Accept if: equal or better trade, OR we're recapturing
+            # with a king (kings always recapture adjacent pieces)
+            if our_piece.piece_type == chess.KING:
+                # King recapture: only if square is safe after
+                board.push(move)
+                king_sq = move.to_square
+                is_safe = not board.is_attacked_by(not bot_color, king_sq)
+                board.pop()
+                if is_safe and (best_move is None or value_diff > best_value_diff):
+                    best_move = move
+                    best_value_diff = value_diff
+            elif value_diff >= 0:
+                # Equal or winning trade with adjacent piece
+                if best_move is None or value_diff > best_value_diff:
+                    best_move = move
+                    best_value_diff = value_diff
+
+        return best_move
 
     # ------------------------------------------------------------------
     # Phase 2: Two-gate filter
