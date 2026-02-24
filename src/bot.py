@@ -58,6 +58,9 @@ class StonefishBot:
         # was found on the previous hazard fire, try again next move
         self._blunder_carry_forward = False
 
+        # Track blunder count for catch-up pressure
+        self._blunder_count = 0
+
     def _load_params(self, config_path: Optional[str] = None) -> Dict:
         """Load bot parameters from JSON config file."""
         if config_path is None:
@@ -128,6 +131,24 @@ class StonefishBot:
                 "mode": "forced",
                 "notes": f"Obvious recapture on {chess.square_name(obvious.to_square)}",
             }
+
+        # ============================================================
+        # Step 0b: Mate-in-1 override
+        # ============================================================
+        # If we have a legal move that delivers checkmate, play it
+        # with ELO-dependent probability (500=70%, 700=90%, 900=100%).
+        mate_move = self._find_mate_in_1(board)
+        if mate_move is not None:
+            m1_rate = self.params.get("mate_in_1_rate", 0.70)
+            if random.random() < m1_rate:
+                return mate_move, {
+                    "mechanism": "mate_in_1",
+                    "maia_rank": None,
+                    "maia_top5": [],
+                    "mode": "forced",
+                    "notes": f"Mate in 1: {mate_move.uci()} (rate={m1_rate})",
+                }
+            # Missed the M1 — fall through to normal pipeline
 
         # --- Get Maia candidates ---
         maia_moves = self._maia.get_top_n_moves(board, n=5)
@@ -210,6 +231,7 @@ class StonefishBot:
             )
             if blunder_result is not None:
                 self._blunder_carry_forward = False
+                self._blunder_count += 1
                 return blunder_result
 
             # No valid blunder candidate found — carry forward
@@ -236,6 +258,25 @@ class StonefishBot:
         }
 
     # ------------------------------------------------------------------
+    # Phase 0b: Mate in 1
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_mate_in_1(board: chess.Board) -> Optional[chess.Move]:
+        """Check if any legal move delivers checkmate.
+
+        Returns:
+            The mating move, or None.
+        """
+        for move in board.legal_moves:
+            board.push(move)
+            is_mate = board.is_checkmate()
+            board.pop()
+            if is_mate:
+                return move
+        return None
+
+    # ------------------------------------------------------------------
     # Phase 0: Obvious recapture
     # ------------------------------------------------------------------
 
@@ -249,8 +290,8 @@ class StonefishBot:
         2. We have a legal capture back on that same square.
         3. The recapturing piece is adjacent (Chebyshev distance <= 1)
            to the capture square.
-        4. The recapture doesn't lose material (captured piece value >=
-           recapturing piece value, OR the square is undefended after).
+        4. The square is safe for our piece after recapturing
+           (not defended by opponent).
 
         Returns:
             The obvious recapture Move, or None.
@@ -291,22 +332,14 @@ class StonefishBot:
             our_value = PIECE_VALUES.get(our_piece.piece_type, 0)
             value_diff = opp_value - our_value  # positive = good trade
 
-            # Accept if: equal or better trade, OR we're recapturing
-            # with a king (kings always recapture adjacent pieces)
-            if our_piece.piece_type == chess.KING:
-                # King recapture: only if square is safe after
-                board.push(move)
-                king_sq = move.to_square
-                is_safe = not board.is_attacked_by(not bot_color, king_sq)
-                board.pop()
-                if is_safe and (best_move is None or value_diff > best_value_diff):
-                    best_move = move
-                    best_value_diff = value_diff
-            elif value_diff >= 0:
-                # Equal or winning trade with adjacent piece
-                if best_move is None or value_diff > best_value_diff:
-                    best_move = move
-                    best_value_diff = value_diff
+            # Safe-square check: is the square defended by opponent after?
+            board.push(move)
+            is_safe = not board.is_attacked_by(not bot_color, target_sq)
+            board.pop()
+
+            if is_safe and (best_move is None or value_diff > best_value_diff):
+                best_move = move
+                best_value_diff = value_diff
 
         return best_move
 
@@ -317,10 +350,14 @@ class StonefishBot:
     def _check_gates(self, game_state: GameState) -> Dict:
         """Run the two-gate opponent model filter.
 
-        Gate 1 — Immediate threat:
-            Check, capture, adjacent to major piece, attack on undefended piece.
-        Gate 2 — Plan interference:
-            Opponent attacks our last-moved piece.
+        Hard gates (always react):
+            1a. Check
+            1b. Capture with reasonable (non-losing) recapture available
+
+        Soft gates (roll react_notice_rate):
+            1c. Adjacent to major piece
+            1d. Attack on undefended piece
+            2.  Plan interference
 
         Returns:
             {"mode": "react" or "solitaire", "detail": str}
@@ -328,17 +365,37 @@ class StonefishBot:
         board = game_state.board
         bot_color = game_state.bot_color
         opp_last = game_state.get_opponent_last_move()
+        notice_rate = self.params.get("react_notice_rate", 0.50)
 
         if opp_last is None:
             return {"mode": "solitaire", "detail": "no_opponent_move"}
 
-        # Gate 1: Immediate threats
+        # Gate 1a (hard): Check — always react
         if board.is_check():
             return {"mode": "react", "detail": "in_check"}
 
+        # Gate 1b (hard): Capture — only react if reasonable recapture exists
+        # "Reasonable" = square is safe for our piece after recapturing
         if opp_last.is_capture:
-            return {"mode": "react", "detail": "piece_captured"}
+            target_sq = opp_last.to_square
+            has_reasonable_recapture = False
+            for move in board.legal_moves:
+                if move.to_square != target_sq or not board.is_capture(move):
+                    continue
+                our_piece = board.piece_at(move.from_square)
+                if our_piece is None or our_piece.color != bot_color:
+                    continue
+                board.push(move)
+                is_safe = not board.is_attacked_by(not bot_color, target_sq)
+                board.pop()
+                if is_safe:
+                    has_reasonable_recapture = True
+                    break
+            if has_reasonable_recapture:
+                return {"mode": "react", "detail": "piece_captured_recapture"}
+            # No reasonable recapture — fall through to soft gates / solitaire
 
+        # Gate 1c (soft): Adjacent to major piece
         opp_landing = opp_last.to_square
         for sq in chess.SQUARES:
             piece = board.piece_at(sq)
@@ -346,8 +403,12 @@ class StonefishBot:
                 continue
             if piece.piece_type in (chess.ROOK, chess.QUEEN, chess.KING):
                 if chebyshev_distance(opp_landing, sq) == 1:
-                    return {"mode": "react", "detail": f"adjacent_threat_{chess.square_name(sq)}"}
+                    if random.random() < notice_rate:
+                        return {"mode": "react", "detail": f"adjacent_threat_{chess.square_name(sq)}"}
+                    else:
+                        return {"mode": "solitaire", "detail": f"missed_adjacent_{chess.square_name(sq)}"}
 
+        # Gate 1d (soft): Attack on undefended piece
         opp_piece = board.piece_at(opp_landing)
         if opp_piece is not None:
             for sq in board.attacks(opp_landing):
@@ -358,15 +419,21 @@ class StonefishBot:
                     continue
                 val = PIECE_VALUES.get(our_piece.piece_type, 0)
                 if val >= 3 and not board.attackers(bot_color, sq):
-                    return {"mode": "react", "detail": f"undefended_{chess.square_name(sq)}_attacked"}
+                    if random.random() < notice_rate:
+                        return {"mode": "react", "detail": f"undefended_{chess.square_name(sq)}_attacked"}
+                    else:
+                        return {"mode": "solitaire", "detail": f"missed_undefended_{chess.square_name(sq)}"}
 
-        # Gate 2: Plan interference
+        # Gate 2 (soft): Plan interference
         bot_last = game_state.get_bot_last_move()
         if bot_last is not None and opp_piece is not None:
             if bot_last.to_square in board.attacks(opp_landing):
                 our_moved_piece = board.piece_at(bot_last.to_square)
                 if our_moved_piece and our_moved_piece.color == bot_color:
-                    return {"mode": "react", "detail": "plan_interference"}
+                    if random.random() < notice_rate:
+                        return {"mode": "react", "detail": "plan_interference"}
+                    else:
+                        return {"mode": "solitaire", "detail": "missed_plan_interference"}
 
         return {"mode": "solitaire", "detail": "none"}
 
@@ -478,6 +545,21 @@ class StonefishBot:
         elif eval_context == "losing":
             base_prob *= self.params.get("losing_multiplier", 1.0)
         # "equal" uses base_prob as-is
+
+        # Blunder catch-up pressure: if the bot has blundered fewer
+        # times than expected by this move number, boost the hazard rate.
+        expected_blunders = 0.0
+        for m in range(threshold_move, bot_move_num + 1):
+            if m <= 25:
+                ramp = (m - threshold_move) / (25 - threshold_move)
+                ramp = max(0.0, min(1.0, ramp))
+                expected_blunders += plateau * ramp
+            else:
+                expected_blunders += plateau
+        deficit = expected_blunders - self._blunder_count
+        if deficit > 0:
+            catchup_rate = self.params.get("blunder_catchup_rate", 0.15)
+            base_prob += deficit * catchup_rate
 
         # Cap at hazard plateau
         hazard_plateau = self.params["hazard_plateau"]

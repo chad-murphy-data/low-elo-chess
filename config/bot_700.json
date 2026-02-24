@@ -13,6 +13,9 @@
 
     "miss_opponent_blunder_rate": 0.62,
     "react_top1_weight": 0.75,
+    "mate_in_1_rate": 0.90,
+    "react_notice_rate": 0.60,
+    "blunder_catchup_rate": 0.12,
 
     "check_impulse": "medium_high",
     "scholars_mate_rate": 0.08,
