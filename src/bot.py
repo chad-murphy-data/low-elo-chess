@@ -172,9 +172,15 @@ class StonefishBot:
         mode = gate_result["mode"]
 
         if mode == "react":
-            # React mode: pick from Maia top 2
-            react_candidates = maia_moves[:min(2, len(maia_moves))]
-            selected_move, selected_rank = self._sample_uniform(react_candidates)
+            # React mode: ELO-aware selection from Maia top 2
+            # 500 = 50/50, 700 = 75/25, 900 = 100% rank 1
+            react_r1_weight = self.params.get("react_top1_weight", 0.50)
+            if len(maia_moves) >= 2 and random.random() < react_r1_weight:
+                selected_move, selected_rank = maia_moves[0].move, maia_moves[0].rank
+            elif len(maia_moves) >= 2:
+                selected_move, selected_rank = maia_moves[1].move, maia_moves[1].rank
+            else:
+                selected_move, selected_rank = maia_moves[0].move, maia_moves[0].rank
             return selected_move, {
                 "mechanism": "react",
                 "maia_rank": selected_rank,
@@ -185,7 +191,7 @@ class StonefishBot:
                 "noticed_blunder": noticed_blunder,
                 "notes": (
                     f"React mode ({gate_result['detail']}). "
-                    f"Picked rank {selected_rank} from top 2."
+                    f"Picked rank {selected_rank} (r1 weight={react_r1_weight})."
                 ),
             }
 

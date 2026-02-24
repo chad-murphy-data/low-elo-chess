@@ -12,6 +12,7 @@
     "attention_decay_label": "slower",
 
     "miss_opponent_blunder_rate": 0.58,
+    "react_top1_weight": 1.00,
 
     "check_impulse": "medium",
     "scholars_mate_rate": 0.06,
