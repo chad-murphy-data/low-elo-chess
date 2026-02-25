@@ -337,9 +337,11 @@ def run_tournament(
             white_bot = bots[white_elo]
             black_bot = bots[black_elo]
 
-            # Reset blunder carry-forward for each game
+            # Reset per-game state for each game
             white_bot._blunder_carry_forward = False
             black_bot._blunder_carry_forward = False
+            white_bot._blunder_count = 0
+            black_bot._blunder_count = 0
 
             if verbose:
                 print(f"  Game {game_num}/{total_games}: "
