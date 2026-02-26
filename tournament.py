@@ -114,6 +114,9 @@ def play_game(
             cp_loss=cp_loss,
             was_blunder=was_blunder,
             mechanism=meta_w.get("mechanism", "unknown"),
+            mode=meta_w.get("mode"),
+            gate_detail=meta_w.get("gate_detail"),
+            blunder_source=meta_w.get("blunder_source"),
             maia_rank=meta_w.get("maia_rank"),
             maia_top5=json.dumps(meta_w.get("maia_top5", [])),
             notes=meta_w.get("notes"),
@@ -122,10 +125,8 @@ def play_game(
         mechanisms_white.append(meta_w.get("mechanism", "unknown"))
         move_list.append(san_w)
 
-        # Sync black's board
-        gs_black.board = gs_white.board.copy()
-        gs_black.ply = gs_white.ply
-        gs_black._current_eval_cp = gs_white._current_eval_cp
+        # Sync: push white's move into black's game state (for move history)
+        gs_black.push_move(move_w, eval_before=eval_before, eval_after=eval_after)
 
         if verbose and full_move <= 5:
             print(f"    {full_move}. {san_w}", end="")
@@ -172,6 +173,9 @@ def play_game(
             cp_loss=cp_loss,
             was_blunder=was_blunder,
             mechanism=meta_b.get("mechanism", "unknown"),
+            mode=meta_b.get("mode"),
+            gate_detail=meta_b.get("gate_detail"),
+            blunder_source=meta_b.get("blunder_source"),
             maia_rank=meta_b.get("maia_rank"),
             maia_top5=json.dumps(meta_b.get("maia_top5", [])),
             notes=meta_b.get("notes"),
@@ -180,10 +184,8 @@ def play_game(
         mechanisms_black.append(meta_b.get("mechanism", "unknown"))
         move_list.append(san_b)
 
-        # Sync white's board
-        gs_white.board = gs_black.board.copy()
-        gs_white.ply = gs_black.ply
-        gs_white._current_eval_cp = gs_black._current_eval_cp
+        # Sync: push black's move into white's game state (for move history)
+        gs_white.push_move(move_b, eval_before=eval_before, eval_after=eval_after)
 
         if verbose and full_move <= 5:
             print(f" {san_b}")

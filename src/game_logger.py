@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS moves (
     cp_loss     INTEGER,
     was_blunder INTEGER DEFAULT 0,
     mechanism   TEXT,
+    mode        TEXT,
+    gate_detail TEXT,
+    blunder_source TEXT,
     maia_rank   INTEGER,
     maia_top5   TEXT,
     notes       TEXT,
@@ -143,6 +146,9 @@ class GameLogger:
         cp_loss: Optional[int] = None,
         was_blunder: bool = False,
         mechanism: Optional[str] = None,
+        mode: Optional[str] = None,
+        gate_detail: Optional[str] = None,
+        blunder_source: Optional[str] = None,
         maia_rank: Optional[int] = None,
         maia_top5: Optional[str] = None,
         notes: Optional[str] = None,
@@ -164,7 +170,13 @@ class GameLogger:
             eval_after: Centipawns after move (White perspective).
             cp_loss: Centipawn loss for this move.
             was_blunder: Whether this move is classified as a blunder (CPL > 100).
-            mechanism: How the move was selected (e.g., "maia_sample").
+            mechanism: How the move was selected (e.g., "maia_personality",
+                "react", "blunder_low", "mate_in_1", "obvious_recapture").
+            mode: Pipeline mode ("react" or "solitaire").
+            gate_detail: Gate trigger detail (e.g., "in_check",
+                "piece_captured_recapture", "adjacent_threat_e1", "none").
+            blunder_source: How the blunder was generated (e.g.,
+                "maia_extended", "repeat_piece", "tactical_trap").
             maia_rank: Which Maia rank was selected (1-5).
             maia_top5: JSON string of Maia's top 5 moves.
             notes: Free-form notes.
@@ -176,14 +188,16 @@ class GameLogger:
             "INSERT INTO moves (game_id, move_number, ply, player, fen_before, "
             "move_uci, move_san, piece_moved, is_capture, is_check, "
             "eval_before, eval_after, cp_loss, was_blunder, mechanism, "
+            "mode, gate_detail, blunder_source, "
             "maia_rank, maia_top5, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 game_id, move_number, ply, player, fen_before,
                 move_uci, move_san, piece_moved,
                 int(is_capture), int(is_check),
                 eval_before, eval_after, cp_loss, int(was_blunder),
-                mechanism, maia_rank, maia_top5, notes,
+                mechanism, mode, gate_detail, blunder_source,
+                maia_rank, maia_top5, notes,
             ),
         )
         self._conn.commit()
