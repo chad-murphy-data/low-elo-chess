@@ -13,6 +13,9 @@
 
     "miss_opponent_blunder_rate": 0.65,
     "react_top1_weight": 0.50,
+    "mate_in_1_rate": 0.70,
+    "react_notice_rate": 0.40,
+    "blunder_catchup_rate": 0.15,
 
     "check_impulse": "high",
     "scholars_mate_rate": 0.10,
@@ -20,8 +23,8 @@
 
     "maia_sampling": {
         "strategy": "lower_half_top_5",
-        "description": "Weight toward positions 4-5 of Maia top-5",
-        "weights": [0.05, 0.10, 0.15, 0.30, 0.40]
+        "description": "Spread across positions 3-5, less rank-5 spam",
+        "weights": [0.10, 0.15, 0.25, 0.30, 0.20]
     },
 
     "blunder_magnitude_weights": {
