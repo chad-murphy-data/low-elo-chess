@@ -20,6 +20,7 @@ from flask import Flask, Response, request, jsonify, render_template_string
 from src.bot import StonefishBot
 from src.game_state import GameState
 from src.game_logger import GameLogger
+from src.tactic_detector import check_stalemate_warning
 
 # Force unbuffered stdout
 if os.environ.get("PYTHONUNBUFFERED") != "1":
@@ -200,6 +201,23 @@ class GameSession:
             blunder_tag = f"  ** BLUNDER ({mag}) **"
         print(f"  Bot: {san} [rank {maia_rank}] {mechanism}{blunder_tag}")
 
+        # Tactic alerts come from bot metadata (trap moves / blunder tactics)
+        tactics_for_human = []
+        if metadata.get("tactic"):
+            tactic = metadata["tactic"]
+            tactics_for_human.append(tactic)
+            print(f"    PUZZLE: [{tactic['type']}] {tactic['description']} (+{tactic['gain']:.1f})")
+
+        # Stalemate warning (coaching, separate from puzzle system)
+        if not self.game_state.is_game_over:
+            human_color = chess.WHITE if self.human_is_white else chess.BLACK
+            stalemate_warning = check_stalemate_warning(
+                self.game_state.board, human_color
+            )
+            if stalemate_warning:
+                tactics_for_human.append(stalemate_warning)
+                print(f"    WARNING: {stalemate_warning['description']}")
+
         data = {
             "fen": self.game_state.board.fen(),
             "move": move.uci(),
@@ -208,6 +226,7 @@ class GameSession:
             "mechanism": mechanism,
             "maia_rank": maia_rank,
             "was_blunder": "blunder" in mechanism,
+            "tactics": tactics_for_human,
         }
 
         if self.game_state.is_game_over:
@@ -475,6 +494,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .move-san.bot { color: #58a6ff; }
   .move-mechanism { color: #8b949e; font-size: 0.75rem; }
   .move-blunder { color: #f85149; font-weight: 700; }
+  .tactic-alert {
+    color: #f59e0b;
+    font-size: 0.75rem;
+    padding-left: 24px;
+    animation: fadeIn 0.5s;
+  }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
   /* Status */
@@ -843,6 +868,32 @@ function logBotMove(data) {
       moveNum++;
     }
   }
+
+  // Render tactic alerts for human
+  var tactics = data.tactics || [];
+  if (tactics.length > 0) {
+    var tacticLabels = {
+      'knight_fork': 'FORK',
+      'bishop_fork': 'FORK',
+      'pawn_fork': 'FORK',
+      'queen_fork': 'FORK',
+      'rook_fork': 'FORK',
+      'trapped_piece': 'TRAPPED',
+      'discovered_attack': 'DISCOVERED',
+      'discovered_check': 'DISCOVERED+',
+      'stalemate_danger': 'STALEMATE!'
+    };
+    for (var i = 0; i < tactics.length; i++) {
+      var t = tactics[i];
+      var label = tacticLabels[t.type] || t.type;
+      var alertDiv = document.createElement('div');
+      alertDiv.className = 'tactic-alert';
+      var gainText = t.gain > 0 ? ' (+' + Math.round(t.gain) + ')' : '';
+      alertDiv.innerHTML = '>> ' + label + ': ' + t.description + gainText;
+      log.appendChild(alertDiv);
+    }
+  }
+
   log.scrollTop = log.scrollHeight;
 }
 

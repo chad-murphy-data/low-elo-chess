@@ -23,6 +23,7 @@ import chess
 from src.engine import MaiaEngine, MaiaMove, StockfishEngine
 from src.features import PIECE_VALUES, PIECE_NAMES, chebyshev_distance
 from src.game_state import GameState
+from src.tactic_detector import detect_all_tactics, engine_validate_tactics
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -46,9 +47,11 @@ class StonefishBot:
         maia_engine: Optional[MaiaEngine] = None,
         stockfish_engine: Optional[StockfishEngine] = None,
         config_path: Optional[str] = None,
+        variant: Optional[str] = None,
     ):
         self.elo_target = elo_target
         self.params = self._load_params(config_path)
+        self.variant = variant  # None = control, "tactic_steering" = treatment
 
         self._maia = maia_engine or MaiaEngine()
         self._stockfish = stockfish_engine or StockfishEngine()
@@ -196,12 +199,34 @@ class StonefishBot:
             # React mode: ELO-aware selection from Maia top 2
             # 500 = 50/50, 700 = 75/25, 900 = 100% rank 1
             react_r1_weight = self.params.get("react_top1_weight", 0.50)
-            if len(maia_moves) >= 2 and random.random() < react_r1_weight:
-                selected_move, selected_rank = maia_moves[0].move, maia_moves[0].rank
-            elif len(maia_moves) >= 2:
-                selected_move, selected_rank = maia_moves[1].move, maia_moves[1].rank
+            threatened_sq = gate_result.get("threatened_square")
+            r2_rejected = False
+
+            if len(maia_moves) >= 2 and random.random() >= react_r1_weight:
+                # Rolled rank 2 — validate it addresses the threat
+                r2_move = maia_moves[1].move
+                if threatened_sq is not None and not self._move_addresses_threat(
+                    r2_move, game_state.board, threatened_sq, gate_result["detail"]
+                ):
+                    # Rank 2 doesn't address the threat — fall back to rank 1
+                    selected_move, selected_rank = maia_moves[0].move, maia_moves[0].rank
+                    r2_rejected = True
+                else:
+                    selected_move, selected_rank = maia_moves[1].move, maia_moves[1].rank
             else:
                 selected_move, selected_rank = maia_moves[0].move, maia_moves[0].rank
+
+            notes = f"React mode ({gate_result['detail']}). "
+            if r2_rejected:
+                r2_san = game_state.board.san(maia_moves[1].move)
+                sq_name = chess.square_name(threatened_sq) if threatened_sq is not None else "?"
+                notes += (
+                    f"Rank 2 ({r2_san}) rejected — doesn't address "
+                    f"threat on {sq_name}. Fell back to rank {selected_rank}."
+                )
+            else:
+                notes += f"Picked rank {selected_rank} (r1 weight={react_r1_weight})."
+
             return selected_move, {
                 "mechanism": "react",
                 "maia_rank": selected_rank,
@@ -210,11 +235,16 @@ class StonefishBot:
                 "gate_detail": gate_result["detail"],
                 "opponent_blundered": opponent_blundered,
                 "noticed_blunder": noticed_blunder,
-                "notes": (
-                    f"React mode ({gate_result['detail']}). "
-                    f"Picked rank {selected_rank} (r1 weight={react_r1_weight})."
-                ),
+                "r2_rejected": r2_rejected,
+                "notes": notes,
             }
+
+        # ============================================================
+        # Step 2.5: Trap scan — look for moves that set up puzzles
+        # ============================================================
+        trap_result = self._trap_scan(game_state)
+        if trap_result is not None:
+            return trap_result
 
         # ============================================================
         # Step 3: Hazard roll — should this move be a blunder?
@@ -242,6 +272,7 @@ class StonefishBot:
         # Step 4: Normal move selection with personality overlays
         # ============================================================
         weighted_moves = self._apply_personality(maia_moves, game_state)
+
         selected_move, selected_rank = self._weighted_sample(weighted_moves)
 
         return selected_move, {
@@ -252,9 +283,7 @@ class StonefishBot:
             "gate_detail": gate_result.get("detail", "none"),
             "opponent_blundered": opponent_blundered,
             "noticed_blunder": noticed_blunder,
-            "notes": (
-                f"Solitaire mode. Personality-weighted rank {selected_rank}."
-            ),
+            "notes": f"Solitaire mode. Personality-weighted rank {selected_rank}.",
         }
 
     # ------------------------------------------------------------------
@@ -312,8 +341,11 @@ class StonefishBot:
         opp_value = PIECE_VALUES.get(opp_piece.piece_type, 0)
 
         # Find all our legal captures on that square
+        # Prefer non-King recaptures — low-ELO players instinctively
+        # recapture with a piece rather than walking the King out.
         best_move = None
         best_value_diff = -999  # higher = better trade for us
+        best_is_king = True     # King is least preferred
 
         for move in board.legal_moves:
             if move.to_square != target_sq:
@@ -331,21 +363,82 @@ class StonefishBot:
 
             our_value = PIECE_VALUES.get(our_piece.piece_type, 0)
             value_diff = opp_value - our_value  # positive = good trade
+            is_king = our_piece.piece_type == chess.KING
 
             # Safe-square check: is the square defended by opponent after?
             board.push(move)
             is_safe = not board.is_attacked_by(not bot_color, target_sq)
             board.pop()
 
-            if is_safe and (best_move is None or value_diff > best_value_diff):
+            if not is_safe:
+                continue
+
+            # Prefer non-King over King; among same category, prefer
+            # higher value_diff (better material trade).
+            if best_move is None:
+                better = True
+            elif best_is_king and not is_king:
+                better = True   # any non-King beats a King recapture
+            elif not best_is_king and is_king:
+                better = False  # don't downgrade from non-King to King
+            else:
+                better = value_diff > best_value_diff
+
+            if better:
                 best_move = move
                 best_value_diff = value_diff
+                best_is_king = is_king
 
         return best_move
 
     # ------------------------------------------------------------------
     # Phase 2: Two-gate filter
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _move_addresses_threat(
+        move: chess.Move,
+        board: chess.Board,
+        threatened_sq: int,
+        gate_detail: str,
+    ) -> bool:
+        """Check whether a candidate react move addresses the threat.
+
+        A move "addresses" a threat on threatened_sq if ANY of:
+          - Moves the threatened piece away
+          - Captures an attacker of the threatened square
+          - After the move, the threatened piece is no longer attacked
+            (covers interposing, adding a defender, etc.)
+          - For check (gate 1a): any legal move addresses check by rule
+        """
+        # Check — every legal move addresses check by definition
+        if gate_detail == "in_check":
+            return True
+
+        # Recapture gate — the move should recapture on that square
+        if gate_detail == "piece_captured_recapture":
+            return move.to_square == threatened_sq
+
+        # Move the threatened piece away
+        if move.from_square == threatened_sq:
+            return True
+
+        # Capture an attacker of the threatened square
+        opp_color = not board.turn  # opponent's color (they just moved)
+        attackers = board.attackers(opp_color, threatened_sq)
+        if move.to_square in attackers:
+            return True
+
+        # General: after this move, is the threatened piece still attacked?
+        # This catches blocking, adding a defender (pin-break), etc.
+        board.push(move)
+        still_attacked = board.is_attacked_by(board.turn, threatened_sq)
+        # board.turn is now opponent after our push
+        board.pop()
+        if not still_attacked:
+            return True
+
+        return False
 
     def _check_gates(self, game_state: GameState) -> Dict:
         """Run the two-gate opponent model filter.
@@ -360,7 +453,8 @@ class StonefishBot:
             2.  Plan interference
 
         Returns:
-            {"mode": "react" or "solitaire", "detail": str}
+            {"mode": "react" or "solitaire", "detail": str,
+             "threatened_square": Optional[int]}
         """
         board = game_state.board
         bot_color = game_state.bot_color
@@ -371,8 +465,10 @@ class StonefishBot:
             return {"mode": "solitaire", "detail": "no_opponent_move"}
 
         # Gate 1a (hard): Check — always react
+        # (Any legal move addresses check by definition, so no validation needed)
         if board.is_check():
-            return {"mode": "react", "detail": "in_check"}
+            return {"mode": "react", "detail": "in_check",
+                    "threatened_square": board.king(bot_color)}
 
         # Gate 1b (hard): Capture — only react if reasonable recapture exists
         # "Reasonable" = square is safe for our piece after recapturing
@@ -392,7 +488,8 @@ class StonefishBot:
                     has_reasonable_recapture = True
                     break
             if has_reasonable_recapture:
-                return {"mode": "react", "detail": "piece_captured_recapture"}
+                return {"mode": "react", "detail": "piece_captured_recapture",
+                        "threatened_square": target_sq}
             # No reasonable recapture — fall through to soft gates / solitaire
 
         # Gate 1c (soft): Adjacent to major piece
@@ -404,7 +501,8 @@ class StonefishBot:
             if piece.piece_type in (chess.ROOK, chess.QUEEN, chess.KING):
                 if chebyshev_distance(opp_landing, sq) == 1:
                     if random.random() < notice_rate:
-                        return {"mode": "react", "detail": f"adjacent_threat_{chess.square_name(sq)}"}
+                        return {"mode": "react", "detail": f"adjacent_threat_{chess.square_name(sq)}",
+                                "threatened_square": sq}
                     else:
                         return {"mode": "solitaire", "detail": f"missed_adjacent_{chess.square_name(sq)}"}
 
@@ -420,7 +518,8 @@ class StonefishBot:
                 val = PIECE_VALUES.get(our_piece.piece_type, 0)
                 if val >= 3 and not board.attackers(bot_color, sq):
                     if random.random() < notice_rate:
-                        return {"mode": "react", "detail": f"undefended_{chess.square_name(sq)}_attacked"}
+                        return {"mode": "react", "detail": f"undefended_{chess.square_name(sq)}_attacked",
+                                "threatened_square": sq}
                     else:
                         return {"mode": "solitaire", "detail": f"missed_undefended_{chess.square_name(sq)}"}
 
@@ -431,7 +530,8 @@ class StonefishBot:
                 our_moved_piece = board.piece_at(bot_last.to_square)
                 if our_moved_piece and our_moved_piece.color == bot_color:
                     if random.random() < notice_rate:
-                        return {"mode": "react", "detail": "plan_interference"}
+                        return {"mode": "react", "detail": "plan_interference",
+                                "threatened_square": bot_last.to_square}
                     else:
                         return {"mode": "solitaire", "detail": "missed_plan_interference"}
 
@@ -504,6 +604,97 @@ class StonefishBot:
             results.append((candidate, weight))
 
         return results
+
+    # ------------------------------------------------------------------
+    # Phase 3b: Trap scan
+    # ------------------------------------------------------------------
+
+    def _trap_scan(self, game_state: GameState) -> Optional[Tuple[chess.Move, dict]]:
+        """Scan all legal moves for trap opportunities.
+
+        For each legal move the bot can play:
+          1. Push the move
+          2. Run 4 pattern detectors from human's color perspective
+          3. Engine-validate any patterns found (>= 150cp swing)
+          4. Track the move that creates the largest confirmed tactic
+
+        Returns (trap_move, metadata_dict) or None.
+        """
+        board = game_state.board
+        human_color = not game_state.bot_color
+        maia_moves = self._maia.get_top_n_moves(board, n=5)
+        maia_top5_data = [
+            {"move": m.move.uci(), "rank": m.rank, "score_cp": m.score_cp}
+            for m in maia_moves
+        ] if maia_moves else []
+
+        best_trap_move = None
+        best_tactic_info = None
+        best_swing = 0
+
+        for move in board.legal_moves:
+            board.push(move)
+
+            if board.is_game_over():
+                board.pop()
+                continue
+
+            try:
+                raw_tactics = detect_all_tactics(board, human_color)
+            except Exception:
+                board.pop()
+                continue
+
+            if not raw_tactics:
+                board.pop()
+                continue
+
+            # Engine-validate the patterns
+            try:
+                validated = engine_validate_tactics(
+                    raw_tactics, board, self._stockfish, human_color,
+                    min_swing_cp=150,
+                )
+            except Exception:
+                board.pop()
+                continue
+
+            board.pop()
+
+            if validated:
+                best_t = max(validated, key=lambda t: t.estimated_gain)
+                swing = best_t.estimated_gain
+                if swing > best_swing:
+                    best_swing = swing
+                    best_trap_move = move
+                    best_tactic_info = {
+                        "type": best_t.tactic_type,
+                        "description": best_t.description,
+                        "gain": best_t.estimated_gain,
+                    }
+
+        if best_trap_move is None:
+            return None
+
+        # Find Maia rank if this move is in top 5
+        maia_rank = None
+        for m in (maia_moves or []):
+            if m.move == best_trap_move:
+                maia_rank = m.rank
+                break
+
+        return best_trap_move, {
+            "mechanism": "trap",
+            "maia_rank": maia_rank,
+            "maia_top5": maia_top5_data,
+            "mode": "solitaire",
+            "gate_detail": "none",
+            "tactic": best_tactic_info,
+            "notes": (
+                f"Trap move — creates {best_tactic_info['type']} for opponent "
+                f"(+{best_swing:.1f} pawns eval swing)."
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Phase 5: Hazard roll
@@ -651,7 +842,30 @@ class StonefishBot:
                 maia_rank = m.rank
                 break
 
-        return chosen_move, {
+        # Check if this blunder creates a tactic for the human
+        blunder_tactic = None
+        human_color = not game_state.bot_color
+        board.push(chosen_move)
+        if not board.is_game_over():
+            try:
+                raw_tactics = detect_all_tactics(board, human_color)
+                if raw_tactics:
+                    validated = engine_validate_tactics(
+                        raw_tactics, board, self._stockfish, human_color,
+                        min_swing_cp=150,
+                    )
+                    if validated:
+                        best = max(validated, key=lambda t: t.estimated_gain)
+                        blunder_tactic = {
+                            "type": best.tactic_type,
+                            "description": best.description,
+                            "gain": best.estimated_gain,
+                        }
+            except Exception:
+                pass
+        board.pop()
+
+        metadata = {
             "mechanism": f"blunder_{magnitude}",
             "maia_rank": maia_rank,
             "maia_top5": maia_top5_data,
@@ -664,6 +878,10 @@ class StonefishBot:
                 f"{'Repeat piece.' if chosen_source == 'repeat_piece' else ''}"
             ),
         }
+        if blunder_tactic:
+            metadata["tactic"] = blunder_tactic
+
+        return chosen_move, metadata
 
     def _build_blunder_pool(
         self,

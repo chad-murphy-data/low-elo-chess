@@ -23,8 +23,8 @@
 
     "maia_sampling": {
         "strategy": "middle_top_5",
-        "description": "Weight toward position 3 of Maia top-5",
-        "weights": [0.10, 0.15, 0.40, 0.20, 0.15]
+        "description": "Peaked at positions 2-3 of Maia top-5",
+        "weights": [0.20, 0.30, 0.30, 0.15, 0.05]
     },
 
     "blunder_magnitude_weights": {

@@ -23,8 +23,8 @@
 
     "maia_sampling": {
         "strategy": "lower_half_top_5",
-        "description": "Weight toward positions 4-5 of Maia top-5",
-        "weights": [0.05, 0.10, 0.15, 0.30, 0.40]
+        "description": "Spread across positions 3-5, less rank-5 spam",
+        "weights": [0.10, 0.15, 0.25, 0.30, 0.20]
     },
 
     "blunder_magnitude_weights": {

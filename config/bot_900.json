@@ -23,8 +23,8 @@
 
     "maia_sampling": {
         "strategy": "upper_half_top_5",
-        "description": "Weight toward positions 1-2 of Maia top-5",
-        "weights": [0.35, 0.30, 0.20, 0.10, 0.05]
+        "description": "Strongly weighted toward rank 1-2 of Maia top-5",
+        "weights": [0.45, 0.30, 0.15, 0.07, 0.03]
     },
 
     "blunder_magnitude_weights": {
